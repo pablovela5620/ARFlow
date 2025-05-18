@@ -114,7 +114,7 @@ public class ARFlowUnityDataSample : MonoBehaviour
             },
             CameraTransform = new RegisterRequest.Types.CameraTransform()
             {
-                Enabled = false
+                Enabled = true
             }
         });
     }
@@ -153,10 +153,22 @@ public class ARFlowUnityDataSample : MonoBehaviour
         var depthBytes = _depthTexture.GetRawTextureData();
 
         Debug.Log($"pixelBytes length: {pixelBytes.Length}, depthBytes length: {depthBytes.Length}");
+
+        const int transformLength = 3 * 4 * sizeof(float);
+        var m = _captureCamera.transform.localToWorldMatrix;
+        var cameraTransformBytes = new byte[transformLength];
+        Buffer.BlockCopy(new[]
+        {
+            m.m00, m.m01, m.m02, m.m03,
+            m.m10, m.m11, m.m12, m.m13,
+            m.m20, m.m21, m.m22, m.m23
+        }, 0, cameraTransformBytes, 0, transformLength);
+
         _client.SendFrame(new DataFrameRequest()
         {
             Color = ByteString.CopyFrom(pixelBytes),
-            Depth = ByteString.CopyFrom(depthBytes)
+            Depth = ByteString.CopyFrom(depthBytes),
+            Transform = ByteString.CopyFrom(cameraTransformBytes)
         });
 
         _captureCamera.targetTexture = null;

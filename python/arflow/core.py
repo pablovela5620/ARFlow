@@ -216,10 +216,9 @@ class ARFlowService(service_pb2_grpc.ARFlowService):
             dtype=np.float32,
         )
 
-        t = np.frombuffer(buffer, dtype=np.float32)
-        transform = np.eye(4)
-        transform[:3, :] = t.reshape((3, 4))
-        transform[:3, 3] = 0
+        t = np.frombuffer(buffer, dtype=np.float32).reshape((3, 4))
+        transform = np.eye(4, dtype=np.float32)
+        transform[:3, :] = t
         transform = y_down_to_y_up @ transform
 
         return transform
