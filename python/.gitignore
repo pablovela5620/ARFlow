@@ -260,3 +260,7 @@ docs/*
 # arflow/service_pb2_grpc.py
 # arflow/service_pb2.py
 # arflow/service_pb2.pyi
+
+# pixi environments
+.pixi
+*.egg-info

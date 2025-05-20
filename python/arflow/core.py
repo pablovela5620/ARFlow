@@ -4,15 +4,15 @@ import os
 import pickle
 import time
 import uuid
+from pathlib import Path
 from time import gmtime, strftime
-from typing import Dict, List
 
 import numpy as np
 import rerun as rr
 
 from arflow import service_pb2, service_pb2_grpc
 
-sessions: Dict[str, service_pb2.RegisterRequest] = {}
+sessions: dict[str, service_pb2.RegisterRequest] = {}
 """@private"""
 
 
@@ -20,20 +20,15 @@ class ARFlowService(service_pb2_grpc.ARFlowService):
     """ARFlow gRPC service."""
 
     _start_time = time.time_ns()
-    _frame_data: List[Dict[str, float | bytes]] = []
+    _frame_data: list[dict[str, float | bytes]] = []
 
     def __init__(self) -> None:
-        self.recorder = rr
         super().__init__()
 
-    def _save_frame_data(
-        self, request: service_pb2.DataFrameRequest | service_pb2.RegisterRequest
-    ):
+    def _save_frame_data(self, request: service_pb2.DataFrameRequest | service_pb2.RegisterRequest):
         """@private"""
         time_stamp = (time.time_ns() - self._start_time) / 1e9
-        self._frame_data.append(
-            {"time_stamp": time_stamp, "data": request.SerializeToString()}
-        )
+        self._frame_data.append({"time_stamp": time_stamp, "data": request.SerializeToString()})
 
     def register(
         self, request: service_pb2.RegisterRequest, context, uid: str | None = None
@@ -48,8 +43,9 @@ class ARFlowService(service_pb2_grpc.ARFlowService):
 
         sessions[uid] = request
 
-        self.recorder.init(f"{request.device_name} - ARFlow", spawn=True)
-        print("Registered a client with UUID: %s" % uid, request)
+        rr.init(f"{request.device_name} - ARFlow", spawn=True)
+        self.parent_log_path = Path("world")
+        print(f"Registered a client with UUID: {uid}", request)
 
         # Call the for user extension code.
         self.on_register(request)
@@ -69,48 +65,56 @@ class ARFlowService(service_pb2_grpc.ARFlowService):
         decoded_data = {}
         session_configs = sessions[request.uid]
 
+        pinhole_path: Path = self.parent_log_path / "camera/pinhole"
         if session_configs.camera_color.enabled:
             color_rgb = ARFlowService.decode_rgb_image(session_configs, request.color)
             decoded_data["color_rgb"] = color_rgb
             color_rgb = np.flipud(color_rgb)
-            self.recorder.log("rgb", rr.Image(color_rgb))
+            rr.log(f"{pinhole_path}/rgb", rr.Image(color_rgb).compress(jpeg_quality=80))
 
         if session_configs.camera_depth.enabled:
             depth_img = ARFlowService.decode_depth_image(session_configs, request.depth)
             decoded_data["depth_img"] = depth_img
             depth_img = np.flipud(depth_img)
-            self.recorder.log("depth", rr.DepthImage(depth_img, meter=1.0))
+            rr.log(f"{pinhole_path}/depth", rr.DepthImage(depth_img, meter=1.0))
 
         if session_configs.camera_transform.enabled:
-            self.recorder.log("world/origin", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN)
-            # self.logger.log(
-            #     "world/xyz",
-            #     rr.Arrows3D(
-            #         vectors=[[1, 0, 0], [0, 1, 0], [0, 0, 1]],
-            #         colors=[[255, 0, 0], [0, 255, 0], [0, 0, 255]],
-            #     ),
-            # )
+            # rr.log(f"{self.parent_log_path}", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
 
             transform = ARFlowService.decode_transform(request.transform)
             decoded_data["transform"] = transform
-            self.recorder.log(
-                "world/camera",
-                self.recorder.Transform3D(
-                    mat3x3=transform[:3, :3], translation=transform[:3, 3]
-                ),
-            )
+            world_T_camera = transform
+
+            extri = Extrinsics(world_R_cam=world_T_camera[:3, :3], world_t_cam=world_T_camera[:3, 3])
+
+            # rr.log(
+            #     f"{pinhole_path.parent}",
+            #     rr.Transform3D(mat3x3=transform[:3, :3], translation=transform[:3, 3], from_parent=False),
+            # )
 
             k = ARFlowService.decode_intrinsic(session_configs)
-            self.recorder.log("world/camera", rr.Pinhole(image_from_camera=k))
-            self.recorder.log("world/camera", rr.Image(np.flipud(color_rgb)))
+            intri = Intrinsics(
+                camera_conventions="RUB",
+                fl_x=k[0, 0],
+                fl_y=k[1, 1],
+                cx=k[0, 2],
+                cy=k[1, 2],
+                height=color_rgb.shape[0],
+                width=color_rgb.shape[1],
+            )
+            pinhole_param = PinholeParameters(name="camera", intrinsics=intri, extrinsics=extri)
+            log_pinhole(pinhole_param, cam_log_path=pinhole_path.parent)
+            # rr.log(
+            #     "world/camera",
+            #     rr.Pinhole(image_from_camera=k, image_plane_distance=0.1, camera_xyz=rr.ViewCoordinates.RDF),
+            # )
+            # rr.log("world/camera", rr.Image(np.flipud(color_rgb)))
 
         if session_configs.camera_point_cloud.enabled:
-            pcd, clr = ARFlowService.decode_point_cloud(
-                session_configs, k, color_rgb, depth_img, transform
-            )
+            pcd, clr = ARFlowService.decode_point_cloud(session_configs, k, color_rgb, depth_img, transform)
             decoded_data["point_cloud_pcd"] = pcd
             decoded_data["point_cloud_clr"] = clr
-            self.recorder.log("world/point_cloud", rr.Points3D(pcd, colors=clr))
+            rr.log("world/point_cloud", rr.Points3D(pcd, colors=clr))
 
         # Call the for user extension code.
         self.on_frame_received(decoded_data)
@@ -138,18 +142,10 @@ class ARFlowService(service_pb2_grpc.ARFlowService):
         print(f"Data saved to {save_path}")
 
     @staticmethod
-    def decode_rgb_image(
-        session_configs: service_pb2.RegisterRequest, buffer: bytes
-    ) -> np.ndarray:
+    def decode_rgb_image(session_configs: service_pb2.RegisterRequest, buffer: bytes) -> np.ndarray:
         # Calculate the size of the image.
-        color_img_w = int(
-            session_configs.camera_intrinsics.resolution_x
-            * session_configs.camera_color.resize_factor_x
-        )
-        color_img_h = int(
-            session_configs.camera_intrinsics.resolution_y
-            * session_configs.camera_color.resize_factor_y
-        )
+        color_img_w = int(session_configs.camera_intrinsics.resolution_x * session_configs.camera_color.resize_factor_x)
+        color_img_h = int(session_configs.camera_intrinsics.resolution_y * session_configs.camera_color.resize_factor_y)
         p = color_img_w * color_img_h
         color_img = np.frombuffer(buffer, dtype=np.uint8)
 
@@ -178,17 +174,13 @@ class ARFlowService(service_pb2_grpc.ARFlowService):
         return color_rgb
 
     @staticmethod
-    def decode_depth_image(
-        session_configs: service_pb2.RegisterRequest, buffer: bytes
-    ) -> np.ndarray:
+    def decode_depth_image(session_configs: service_pb2.RegisterRequest, buffer: bytes) -> np.ndarray:
         if session_configs.camera_depth.data_type == "f32":
             dtype = np.float32
         elif session_configs.camera_depth.data_type == "u16":
             dtype = np.uint16
         else:
-            raise ValueError(
-                f"Unknown depth data type: {session_configs.camera_depth.data_type}"
-            )
+            raise ValueError(f"Unknown depth data type: {session_configs.camera_depth.data_type}")
 
         depth_img = np.frombuffer(buffer, dtype=dtype)
         depth_img = depth_img.reshape(
@@ -219,8 +211,7 @@ class ARFlowService(service_pb2_grpc.ARFlowService):
         t = np.frombuffer(buffer, dtype=np.float32)
         transform = np.eye(4)
         transform[:3, :] = t.reshape((3, 4))
-        transform[:3, 3] = 0
-        transform = y_down_to_y_up @ transform
+        # transform = y_down_to_y_up @ transform
 
         return transform
 
@@ -254,14 +245,8 @@ class ARFlowService(service_pb2_grpc.ARFlowService):
         color_rgb = np.flipud(color_rgb)
         depth_img = np.flipud(depth_img)
 
-        color_img_w = int(
-            session_configs.camera_intrinsics.resolution_x
-            * session_configs.camera_color.resize_factor_x
-        )
-        color_img_h = int(
-            session_configs.camera_intrinsics.resolution_y
-            * session_configs.camera_color.resize_factor_y
-        )
+        color_img_w = int(session_configs.camera_intrinsics.resolution_x * session_configs.camera_color.resize_factor_x)
+        color_img_h = int(session_configs.camera_intrinsics.resolution_y * session_configs.camera_color.resize_factor_y)
         u, v = np.meshgrid(np.arange(color_img_w), np.arange(color_img_h))
         fx, fy = k[0, 0], k[1, 1]
         cx, cy = k[0, 2], k[1, 2]

@@ -1,39 +1,32 @@
-[tool.poetry]
+[project]
+authors = [{ name = "Pablo Vela", email = "pablovela5620@gmail.com" }]
 name = "arflow"
-version = "0.3.0"
-description = "ARFlow is a data-sharing layer that enables developer-friendly data streaming, storage, and visualization for augmented reality (AR) device data."
-authors = ["Yiqin Zhao <yiqinzhao@outlook.com>"]
-readme = "README.md"
-packages = [{ include = "arflow" }]
-license = "GPL-3.0"
-homepage = "https://cake.wpi.edu/ARFlow/"
-repository = "https://github.com/cake-lab/ARFlow"
-
-[tool.poetry.urls]
-"Paper" = "https://doi.org/10.1145/3638550.3643617"
-"Video" = "https://youtu.be/mml8YrCgfTk"
-
-[tool.poetry.dependencies]
-python = ">=3.9,<3.13"
-rerun-sdk = "^0.12.1"
-grpcio = "^1.60.1"
-grpcio-tools = "^1.60.1"
-
-[tool.poetry.group.dev.dependencies]
-ruff = "^0.6.4"
-pyright = "^1.1.379"
-pytest = "^8.3.2"
-pre-commit = "^3.8.0"
-
-[tool.poetry.group.docs.dependencies]
-pdoc = "^14.6.1"
+requires-python = ">= 3.11"
+version = "0.1.0"
+dependencies = []
 
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+build-backend = "hatchling.build"
+requires = ["hatchling"]
 
-[tool.poetry.scripts]
-serve = "arflow.serve:serve"
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+[tool.pixi.pypi-dependencies]
+arflow = { path = ".", editable = true }
+simplecv = { git = "https://github.com/pablovela5620/simplecv.git" }
+
+[tool.pixi.tasks]
+
+[tool.pixi.dependencies]
+python = "==3.12"
+rerun-sdk = ">=0.23.2,<0.24"
+numpy = ">=2"
+grpcio = ">=1.71.0,<2"
+grpcio-tools = ">=1.71.0,<2"
+jaxtyping = ">=0.3.2,<0.4"
+beartype = ">=0.20.2,<0.21"
 
 [tool.ruff]
 # gRPC generated files
@@ -43,20 +36,31 @@ extend-exclude = [
     "arflow/service_pb2.pyi",
 ]
 
+line-length = 150
+select = [
+    # pycodestyle
+    "E",
+    # Pyflakes
+    "F",
+    # pyupgrade
+    "UP",
+    # flake8-bugbear
+    "B",
+    # flake8-simplify
+    "SIM",
+    # isort
+    "I",
+]
+
+ignore = [
+    "E501", # Line too long.
+    "F722", # Forward annotation false positive from jaxtyping. Should be caught by pyright.
+    "F821", # Forward annotation false positive from jaxtyping. Should be caught by pyright.
+]
+
 [tool.ruff.lint]
 # https://github.com/astral-sh/ruff-vscode/blob/main/README.md#configuring-vs-code
 extend-select = ["I"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
-
-[tool.pyright]
-typeCheckingMode = "off" # TODO: Enable strict type checking
-ignore = [
-    "arflow/service_pb2.py",
-    "arflow/service_pb2_grpc.py",
-    "arflow/service_pb2.pyi",
-]
-# https://github.com/RobertCraigie/pyright-python#pre-commit
-venvPath = "."
-venv = ".venv"
