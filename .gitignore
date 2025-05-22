@@ -302,3 +302,4 @@ crashlytics-build.properties
 # End of https://www.toptal.com/developers/gitignore/api/macos,visualstudiocode,python,unity
 
 website/docs/*
+unity/ios-build/*

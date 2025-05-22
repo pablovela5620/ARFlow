@@ -9,6 +9,9 @@ from time import gmtime, strftime
 
 import numpy as np
 import rerun as rr
+import rerun.blueprint as rrb
+from simplecv.camera_parameters import Extrinsics, Intrinsics, PinholeParameters
+from simplecv.rerun_log_utils import log_pinhole
 
 from arflow import service_pb2, service_pb2_grpc
 
@@ -47,6 +50,21 @@ class ARFlowService(service_pb2_grpc.ARFlowService):
         self.parent_log_path = Path("world")
         print(f"Registered a client with UUID: {uid}", request)
 
+        blueprint = rrb.Blueprint(
+            rrb.Horizontal(
+                rrb.Spatial3DView(),
+                rrb.Grid(
+                    rrb.Spatial2DView(origin=f"{self.parent_log_path}/camera/pinhole/rgb"),
+                    rrb.Spatial2DView(origin=f"{self.parent_log_path}/camera/pinhole/depth"),
+                ),
+                column_shares=[3, 1],
+            ),
+            collapse_panels=True,
+        )
+        rr.send_blueprint(blueprint=blueprint)
+
+        rr.log("/", rr.ViewCoordinates.RDF, static=True)
+
         # Call the for user extension code.
         self.on_register(request)
 
@@ -65,36 +83,43 @@ class ARFlowService(service_pb2_grpc.ARFlowService):
         decoded_data = {}
         session_configs = sessions[request.uid]
 
-        pinhole_path: Path = self.parent_log_path / "camera/pinhole"
+        cam_log_path = self.parent_log_path / "camera"
+        pinhole_log_path: Path = cam_log_path / "pinhole"
         if session_configs.camera_color.enabled:
             color_rgb = ARFlowService.decode_rgb_image(session_configs, request.color)
             decoded_data["color_rgb"] = color_rgb
-            color_rgb = np.flipud(color_rgb)
-            rr.log(f"{pinhole_path}/rgb", rr.Image(color_rgb).compress(jpeg_quality=80))
+            color_rgb = np.fliplr(color_rgb)
+            rr.log(f"{pinhole_log_path}/rgb", rr.Image(color_rgb).compress(jpeg_quality=80))
 
         if session_configs.camera_depth.enabled:
             depth_img = ARFlowService.decode_depth_image(session_configs, request.depth)
             decoded_data["depth_img"] = depth_img
-            depth_img = np.flipud(depth_img)
-            rr.log(f"{pinhole_path}/depth", rr.DepthImage(depth_img, meter=1.0))
+            depth_img = np.fliplr(depth_img)
+            rr.log(f"{pinhole_log_path}/depth", rr.DepthImage(depth_img, meter=1.0))
 
         if session_configs.camera_transform.enabled:
             # rr.log(f"{self.parent_log_path}", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
 
             transform = ARFlowService.decode_transform(request.transform)
             decoded_data["transform"] = transform
-            world_T_camera = transform
 
-            extri = Extrinsics(world_R_cam=world_T_camera[:3, :3], world_t_cam=world_T_camera[:3, 3])
+            ulf_to_rdf = np.array(
+                [
+                    [0.0, -1.0, 0.0, 0],
+                    [1.0, 0.0, 0.0, 0],
+                    [0.0, 0.0, 1.0, 0],
+                    [0.0, 0.0, 0.0, 1.0],
+                ],
+                dtype=np.float32,
+            )
 
-            # rr.log(
-            #     f"{pinhole_path.parent}",
-            #     rr.Transform3D(mat3x3=transform[:3, :3], translation=transform[:3, 3], from_parent=False),
-            # )
+            world_T_cam = transform @ ulf_to_rdf
+
+            extri = Extrinsics(world_R_cam=world_T_cam[:3, :3], world_t_cam=world_T_cam[:3, 3])
 
             k = ARFlowService.decode_intrinsic(session_configs)
             intri = Intrinsics(
-                camera_conventions="RUB",
+                camera_conventions="RDF",
                 fl_x=k[0, 0],
                 fl_y=k[1, 1],
                 cx=k[0, 2],
@@ -103,18 +128,13 @@ class ARFlowService(service_pb2_grpc.ARFlowService):
                 width=color_rgb.shape[1],
             )
             pinhole_param = PinholeParameters(name="camera", intrinsics=intri, extrinsics=extri)
-            log_pinhole(pinhole_param, cam_log_path=pinhole_path.parent)
-            # rr.log(
-            #     "world/camera",
-            #     rr.Pinhole(image_from_camera=k, image_plane_distance=0.1, camera_xyz=rr.ViewCoordinates.RDF),
-            # )
-            # rr.log("world/camera", rr.Image(np.flipud(color_rgb)))
+            log_pinhole(pinhole_param, cam_log_path=cam_log_path, image_plane_distance=0.1)
 
-        if session_configs.camera_point_cloud.enabled:
-            pcd, clr = ARFlowService.decode_point_cloud(session_configs, k, color_rgb, depth_img, transform)
-            decoded_data["point_cloud_pcd"] = pcd
-            decoded_data["point_cloud_clr"] = clr
-            rr.log("world/point_cloud", rr.Points3D(pcd, colors=clr))
+        # if session_configs.camera_point_cloud.enabled:
+        #     pcd, clr = ARFlowService.decode_point_cloud(session_configs, k, color_rgb, depth_img, transform)
+        #     decoded_data["point_cloud_pcd"] = pcd
+        #     decoded_data["point_cloud_clr"] = clr
+        #     rr.log("world/point_cloud", rr.Points3D(pcd, colors=clr))
 
         # Call the for user extension code.
         self.on_frame_received(decoded_data)
@@ -200,7 +220,7 @@ class ARFlowService(service_pb2_grpc.ARFlowService):
     def decode_transform(buffer: bytes):
         y_down_to_y_up = np.array(
             [
-                [1.0, -0.0, 0.0, 0],
+                [1.0, 0.0, 0.0, 0],
                 [0.0, -1.0, 0.0, 0],
                 [0.0, 0.0, 1.0, 0],
                 [0.0, 0.0, 0, 1.0],
@@ -211,7 +231,8 @@ class ARFlowService(service_pb2_grpc.ARFlowService):
         t = np.frombuffer(buffer, dtype=np.float32)
         transform = np.eye(4)
         transform[:3, :] = t.reshape((3, 4))
-        # transform = y_down_to_y_up @ transform
+
+        transform = y_down_to_y_up @ transform
 
         return transform
 
