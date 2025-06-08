@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import sys
+import struct
 
 import arflow
 
@@ -13,8 +14,8 @@ class MinimalService(arflow.ARFlowService):
         pass
 
     def on_frame_received(self, frame_data: arflow.DataFrameRequest):
+        # Check if depth field contains hand data
         pass
-
 
 def main() -> None:
     # sanity-check since all other example scripts take arguments:
