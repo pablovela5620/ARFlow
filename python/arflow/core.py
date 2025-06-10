@@ -133,12 +133,14 @@ class ARFlowService(service_pb2_grpc.ARFlowService):
         self.parent_log_path = Path("world")
         print(f"Registered a client with UUID: {uid}", request)
 
+        self.diag = np.diag([1, 1, -1])
+
         blueprint = rrb.Blueprint(
             rrb.Horizontal(
                 rrb.Spatial3DView(),
                 rrb.Grid(
                     rrb.Spatial2DView(origin=f"{self.parent_log_path}/camera/pinhole/rgb"),
-                    rrb.Spatial2DView(origin=f"{self.parent_log_path}/camera/pinhole/depth"),
+                    # rrb.Spatial2DView(origin=f"{self.parent_log_path}/camera/pinhole/depth"),
                 ),
                 column_shares=[3, 1],
             ),
@@ -146,7 +148,7 @@ class ARFlowService(service_pb2_grpc.ARFlowService):
         )
         rr.send_blueprint(blueprint=blueprint)
 
-        rr.log("/", rr.ViewCoordinates.RDF, static=True)
+        rr.log("/", rr.ViewCoordinates.RUB, static=True)
         set_pose_annotation_context(self.parent_log_path)
 
         # Call the for user extension code.
@@ -172,7 +174,7 @@ class ARFlowService(service_pb2_grpc.ARFlowService):
         if session_configs.camera_color.enabled:
             color_rgb = ARFlowService.decode_rgb_image(session_configs, request.color)
             decoded_data["color_rgb"] = color_rgb
-            color_rgb = np.fliplr(color_rgb)
+            # color_rgb = np.fliplr(color_rgb)
             rr.log(f"{pinhole_log_path}/rgb", rr.Image(color_rgb).compress(jpeg_quality=80))
 
         if session_configs.camera_depth.enabled:
@@ -188,6 +190,7 @@ class ARFlowService(service_pb2_grpc.ARFlowService):
                 left_xyz = np.array(hands_data.left_points, dtype=np.float32)
                 # remove the first point, which is some weird extra point
                 left_xyz = left_xyz[1:]
+                left_xyz = (self.diag @ left_xyz.T).T
 
                 rr.log(
                     f"{self.parent_log_path}/left_hand",
@@ -203,6 +206,7 @@ class ARFlowService(service_pb2_grpc.ARFlowService):
                 right_xyz = np.array(hands_data.right_points, dtype=np.float32)
                 # remove the first point, which is some weird extra point
                 right_xyz = right_xyz[1:]
+                right_xyz = (self.diag @ right_xyz.T).T
                 rr.log(
                     f"{self.parent_log_path}/right_hand",
                     rr.Points3D(
@@ -219,18 +223,21 @@ class ARFlowService(service_pb2_grpc.ARFlowService):
 
             transform = ARFlowService.decode_transform(request.transform)
             decoded_data["transform"] = transform
+            world_T_cam = transform.copy()
 
-            ulf_to_rdf = np.array(
-                [
-                    [0.0, -1.0, 0.0, 0],
-                    [1.0, 0.0, 0.0, 0],
-                    [0.0, 0.0, 1.0, 0],
-                    [0.0, 0.0, 0.0, 1.0],
-                ],
-                dtype=np.float32,
-            )
+            # world_T_cam = self.diag @ world_T_cam
 
-            world_T_cam = transform @ ulf_to_rdf
+            # ulf_to_rdf = np.array(
+            #     [
+            #         [0.0, -1.0, 0.0, 0],
+            #         [1.0, 0.0, 0.0, 0],
+            #         [0.0, 0.0, 1.0, 0],
+            #         [0.0, 0.0, 0.0, 1.0],
+            #     ],
+            #     dtype=np.float32,
+            # )
+
+            # world_T_cam = transform @ ulf_to_rdf
 
             extri = Extrinsics(world_R_cam=world_T_cam[:3, :3], world_t_cam=world_T_cam[:3, 3])
 
@@ -335,21 +342,21 @@ class ARFlowService(service_pb2_grpc.ARFlowService):
 
     @staticmethod
     def decode_transform(buffer: bytes):
-        y_down_to_y_up = np.array(
-            [
-                [1.0, 0.0, 0.0, 0],
-                [0.0, -1.0, 0.0, 0],
-                [0.0, 0.0, 1.0, 0],
-                [0.0, 0.0, 0, 1.0],
-            ],
-            dtype=np.float32,
-        )
+        # y_down_to_y_up = np.array(
+        #     [
+        #         [1.0, 0.0, 0.0, 0],
+        #         [0.0, -1.0, 0.0, 0],
+        #         [0.0, 0.0, 1.0, 0],
+        #         [0.0, 0.0, 0, 1.0],
+        #     ],
+        #     dtype=np.float32,
+        # )
 
         t = np.frombuffer(buffer, dtype=np.float32)
         transform = np.eye(4)
         transform[:3, :] = t.reshape((3, 4))
 
-        transform = y_down_to_y_up @ transform
+        # transform = y_down_to_y_up @ transform
 
         return transform
 
