@@ -4,9 +4,9 @@ import os
 import pickle
 import re
 import struct
-from collections import namedtuple
 import time
 import uuid
+from collections import namedtuple
 from pathlib import Path
 from time import gmtime, strftime
 
@@ -25,11 +25,82 @@ sessions: dict[str, service_pb2.RegisterRequest] = {}
 HandData = namedtuple(
     "HandData",
     [
-        "left_tracked", "left_points", "left_confidence",
-        "right_tracked", "right_points", "right_confidence",
-        "timestamp"
-    ]
+        "left_tracked",
+        "left_points",
+        "left_confidence",
+        "right_tracked",
+        "right_points",
+        "right_confidence",
+        "timestamp",
+    ],
 )
+
+META_QUEST_PALM_CONNECTIONS = ((0, 1), (1, 2), (1, 5), (1, 8), (1, 11), (1, 14))
+META_QUEST_THUMB_CONNECTIONS = ((0, 1), (1, 2), (2, 3), (3, 4), (4, 18))
+META_QUEST_INDEX_FINGER_CONNECTIONS = ((0, 1), (1, 5), (5, 6), (6, 7), (7, 19))
+META_QUEST_MIDDLE_FINGER_CONNECTIONS = ((0, 1), (1, 8), (8, 9), (9, 10), (10, 20))
+META_QUEST_RING_FINGER_CONNECTIONS = ((0, 1), (1, 11), (11, 12), (12, 13), (13, 21))
+META_QUEST_PINKY_FINGER_CONNECTIONS = ((0, 1), (1, 14), (14, 15), (15, 16), (16, 17), (17, 22))
+META_QUEST_LINKS: tuple[tuple[int, int], ...] = (
+    # META_QUEST_PALM_CONNECTIONS
+    META_QUEST_THUMB_CONNECTIONS
+    + META_QUEST_INDEX_FINGER_CONNECTIONS
+    + META_QUEST_MIDDLE_FINGER_CONNECTIONS
+    + META_QUEST_RING_FINGER_CONNECTIONS
+    + META_QUEST_PINKY_FINGER_CONNECTIONS
+)
+
+META_QUEST_ID2NAME: dict[int, str] = {
+    0: "forearm_stub",  # Hand_ForearmStub   (virtual, a few cm up the forearm)
+    1: "wrist_root",  # Hand_WristRoot
+    # ――― Thumb (metacarpal + 3 phalanges) ―――
+    2: "thumb_1",  # Hand_Thumb1  – proximal / MCP
+    3: "thumb_2",  # Hand_Thumb2  – intermediate / IP
+    4: "thumb_3",  # Hand_Thumb3  – distal
+    # ――― Index finger (no "0" bone in the enum) ―――
+    5: "index_1",  # Hand_Index1  – metacarpal / MCP
+    6: "index_2",  # Hand_Index2  – PIP
+    7: "index_3",  # Hand_Index3  – DIP
+    # ――― Middle finger ―――
+    8: "middle_1",  # Hand_Middle1 – metacarpal / MCP
+    9: "middle_2",  # Hand_Middle2 – PIP
+    10: "middle_3",  # Hand_Middle3 – DIP
+    # ――― Ring finger ―――
+    11: "ring_1",  # Hand_Ring1
+    12: "ring_2",  # Hand_Ring2
+    13: "ring_3",  # Hand_Ring3
+    # ――― Pinky (has a "0" metacarpal) ―――
+    14: "pinky_0",  # Hand_Pinky0 – metacarpal
+    15: "pinky_1",  # Hand_Pinky1 – MCP
+    16: "pinky_2",  # Hand_Pinky2 – PIP
+    17: "pinky_3",  # Hand_Pinky3 – DIP
+    18: "thumb_tip",  # Hand_ThumbTip
+    19: "index_tip",  # Hand_IndexTip
+    20: "middle_tip",  # Hand_MiddleTip
+    21: "ring_tip",  # Hand_RingTip
+    22: "pinky_tip",  # Hand_PinkyTip
+}
+
+META_QUEST_IDS: list[int] = [int(key) for key in META_QUEST_ID2NAME]
+
+
+def set_pose_annotation_context(parent_log_path: Path) -> None:
+    rr.log(
+        f"{parent_log_path}",
+        rr.AnnotationContext(
+            [
+                rr.ClassDescription(
+                    info=rr.AnnotationInfo(id=0, label="Meta Quest Keypoints", color=(0, 0, 255)),
+                    keypoint_annotations=[
+                        rr.AnnotationInfo(id=id, label=name) for id, name in META_QUEST_ID2NAME.items()
+                    ],
+                    keypoint_connections=META_QUEST_LINKS,
+                ),
+            ]
+        ),
+        static=True,
+    )
+
 
 class ARFlowService(service_pb2_grpc.ARFlowService):
     """ARFlow gRPC service."""
@@ -76,6 +147,7 @@ class ARFlowService(service_pb2_grpc.ARFlowService):
         rr.send_blueprint(blueprint=blueprint)
 
         rr.log("/", rr.ViewCoordinates.RDF, static=True)
+        set_pose_annotation_context(self.parent_log_path)
 
         # Call the for user extension code.
         self.on_register(request)
@@ -110,9 +182,37 @@ class ARFlowService(service_pb2_grpc.ARFlowService):
             rr.log(f"{pinhole_log_path}/depth", rr.DepthImage(depth_img, meter=1.0))
         else:
             print("camera_depth.enabled else")
-            hands_data = self.deserialize_hand_tracking_data(request.depth)
+            hands_data: HandData = self.deserialize_hand_tracking_data(request.depth)
             decoded_data["hands"] = hands_data
+            if hands_data.left_tracked:
+                left_xyz = np.array(hands_data.left_points, dtype=np.float32)
+                # remove the first point, which is some weird extra point
+                left_xyz = left_xyz[1:]
 
+                rr.log(
+                    f"{self.parent_log_path}/left_hand",
+                    rr.Points3D(
+                        left_xyz,
+                        class_ids=0,
+                        keypoint_ids=META_QUEST_IDS,
+                        show_labels=False,
+                        # colors=np.full((len(hands_data.left_points), 3), 255, dtype=np.uint8),
+                    ),
+                )
+            if hands_data.right_tracked:
+                right_xyz = np.array(hands_data.right_points, dtype=np.float32)
+                # remove the first point, which is some weird extra point
+                right_xyz = right_xyz[1:]
+                rr.log(
+                    f"{self.parent_log_path}/right_hand",
+                    rr.Points3D(
+                        right_xyz,
+                        class_ids=0,
+                        keypoint_ids=META_QUEST_IDS,
+                        show_labels=False,
+                        # colors=np.full((len(hands_data.right_points), 3), 255, dtype=np.uint8),
+                    ),
+                )
 
         if session_configs.camera_transform.enabled:
             # rr.log(f"{self.parent_log_path}", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
@@ -302,7 +402,7 @@ class ARFlowService(service_pb2_grpc.ARFlowService):
     def deserialize_hand_tracking_data(buf: bytes) -> HandData:
         """
         Recreates the C# structure written in ARFlowMetaQuest.SerializeHandTrackingData.
-        
+
         Returns
         -------
         HandData named-tuple with:
@@ -317,7 +417,7 @@ class ARFlowService(service_pb2_grpc.ARFlowService):
         off = 0
 
         # ---- Header ------------------------------------------------------------
-        if buf[0:4] != b'HAND':
+        if buf[0:4] != b"HAND":
             raise ValueError("Buffer does not start with 'HAND' header")
         off += 4
 
@@ -327,14 +427,14 @@ class ARFlowService(service_pb2_grpc.ARFlowService):
         left_points, left_confidence = [], 0
 
         if left_tracked:
-            (left_count,) = struct.unpack_from('<I', buf, off)  # uint32
+            (left_count,) = struct.unpack_from("<I", buf, off)  # uint32
             off += 4
             for _ in range(left_count):
-                x, y, z = struct.unpack_from('<fff', buf, off)   # 3 × float32
+                x, y, z = struct.unpack_from("<fff", buf, off)  # 3 × float32
                 off += 12
                 left_points.append((x, y, z))
-            left_confidence = buf[off]          # 1-byte enum
-            off += 4                            # skip confidence + 3-byte padding
+            left_confidence = buf[off]  # 1-byte enum
+            off += 4  # skip confidence + 3-byte padding
 
         # ---- Right hand --------------------------------------------------------
         right_tracked = bool(buf[off])
@@ -342,20 +442,18 @@ class ARFlowService(service_pb2_grpc.ARFlowService):
         right_points, right_confidence = [], 0
 
         if right_tracked:
-            (right_count,) = struct.unpack_from('<I', buf, off)
+            (right_count,) = struct.unpack_from("<I", buf, off)
             off += 4
             for _ in range(right_count):
-                x, y, z = struct.unpack_from('<fff', buf, off)
+                x, y, z = struct.unpack_from("<fff", buf, off)
                 off += 12
                 right_points.append((x, y, z))
             right_confidence = buf[off]
-            off += 4                            # confidence + padding
+            off += 4  # confidence + padding
 
         # ---- Timestamp ---------------------------------------------------------
-        (timestamp,) = struct.unpack_from('<f', buf, off)       # float32
+        (timestamp,) = struct.unpack_from("<f", buf, off)  # float32
 
         return HandData(
-            left_tracked, left_points, left_confidence,
-            right_tracked, right_points, right_confidence,
-            timestamp
+            left_tracked, left_points, left_confidence, right_tracked, right_points, right_confidence, timestamp
         )
