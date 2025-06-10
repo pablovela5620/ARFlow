@@ -190,7 +190,7 @@ class ARFlowService(service_pb2_grpc.ARFlowService):
                 left_xyz = np.array(hands_data.left_points, dtype=np.float32)
                 # remove the first point, which is some weird extra point
                 left_xyz = left_xyz[1:]
-                # left_xyz = (self.diag @ left_xyz.T).T
+                left_xyz = (self.diag @ left_xyz.T).T
 
                 rr.log(
                     f"{self.parent_log_path}/left_hand",
@@ -206,7 +206,7 @@ class ARFlowService(service_pb2_grpc.ARFlowService):
                 right_xyz = np.array(hands_data.right_points, dtype=np.float32)
                 # remove the first point, which is some weird extra point
                 right_xyz = right_xyz[1:]
-                # right_xyz = (self.diag @ right_xyz.T).T
+                right_xyz = (self.diag @ right_xyz.T).T
                 rr.log(
                     f"{self.parent_log_path}/right_hand",
                     rr.Points3D(
@@ -224,6 +224,10 @@ class ARFlowService(service_pb2_grpc.ARFlowService):
             transform = ARFlowService.decode_transform(request.transform)
             decoded_data["transform"] = transform
             world_T_cam = transform.copy()
+
+            diag4x4 = np.eye(4, dtype=np.float32)
+            diag4x4[:3, :3] = self.diag
+            world_T_cam = diag4x4 @ world_T_cam
 
             # world_T_cam = self.diag @ world_T_cam
 
