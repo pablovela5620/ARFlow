@@ -4,6 +4,7 @@ import os
 import pickle
 import re
 import struct
+from collections import namedtuple
 import time
 import uuid
 from pathlib import Path
@@ -20,6 +21,15 @@ from arflow import service_pb2, service_pb2_grpc
 sessions: dict[str, service_pb2.RegisterRequest] = {}
 """@private"""
 
+
+HandData = namedtuple(
+    "HandData",
+    [
+        "left_tracked", "left_points", "left_confidence",
+        "right_tracked", "right_points", "right_confidence",
+        "timestamp"
+    ]
+)
 
 class ARFlowService(service_pb2_grpc.ARFlowService):
     """ARFlow gRPC service."""
@@ -80,7 +90,6 @@ class ARFlowService(service_pb2_grpc.ARFlowService):
         """Process an incoming frame."""
 
         self._save_frame_data(request)
-        print("Processing frame")
 
         # Start processing.
         decoded_data = {}
@@ -101,8 +110,8 @@ class ARFlowService(service_pb2_grpc.ARFlowService):
             rr.log(f"{pinhole_log_path}/depth", rr.DepthImage(depth_img, meter=1.0))
         else:
             print("camera_depth.enabled else")
-            hands_data = self.parse_hand_data(request.depth)
-            self._print_hand_poses(hands_data)
+            hands_data = self.deserialize_hand_tracking_data(request.depth)
+            decoded_data["hands"] = hands_data
 
 
         if session_configs.camera_transform.enabled:
@@ -290,162 +299,63 @@ class ARFlowService(service_pb2_grpc.ARFlowService):
         return pcd, clr
 
     @staticmethod
-    def parse_hand_data(depth_bytes: bytes) -> dict | None:
-        """Parse hand data from the depth bytes according to the specified format."""
-        print(f"[DEBUG] parse_hand_data: Received {len(depth_bytes)} bytes")
+    def deserialize_hand_tracking_data(buf: bytes) -> HandData:
+        """
+        Recreates the C# structure written in ARFlowMetaQuest.SerializeHandTrackingData.
         
-        if len(depth_bytes) < 13:  # Minimum: header(4) + left_tracked(1) + right_tracked(1) + timestamp(4) + padding
-            print(f"[DEBUG] parse_hand_data: Insufficient bytes ({len(depth_bytes)} < 13)")
-            return None
-            
-        offset = 0
-        
-        # Bytes 0-3: "HAND" header
-        header = depth_bytes[offset:offset+4].decode('ascii', errors='ignore')
-        print(f"[DEBUG] parse_hand_data: Header = '{header}'")
-        if header != "HAND":
-            print(f"[DEBUG] parse_hand_data: Invalid header: {header}")
-            return None
-        offset += 4
-        
-        # Byte 4: Left hand tracked (0/1)
-        left_tracked = struct.unpack('<B', depth_bytes[offset:offset+1])[0] == 1
-        print(f"[DEBUG] parse_hand_data: Left hand tracked = {left_tracked}")
-        offset += 1
-        
-        # Left hand data (if tracked)
-        left_data = None
+        Returns
+        -------
+        HandData named-tuple with:
+            left_tracked      : bool
+            left_points       : list[(x,y,z) float]
+            left_confidence   : int 0-255
+            right_tracked     : bool
+            right_points      : list[(x,y,z) float]
+            right_confidence  : int 0-255
+            timestamp         : float  (seconds since Unity started)
+        """
+        off = 0
+
+        # ---- Header ------------------------------------------------------------
+        if buf[0:4] != b'HAND':
+            raise ValueError("Buffer does not start with 'HAND' header")
+        off += 4
+
+        # ---- Left hand ---------------------------------------------------------
+        left_tracked = bool(buf[off])
+        off += 1
+        left_points, left_confidence = [], 0
+
         if left_tracked:
-            print(f"[DEBUG] parse_hand_data: Parsing left hand data at offset {offset}")
-            if len(depth_bytes) < offset + 68:  # 60 bytes positions + 8 bytes state
-                print(f"[DEBUG] parse_hand_data: Insufficient bytes for left hand data ({len(depth_bytes)} < {offset + 68})")
-                return None
-                
-            # 5 finger positions: 5 fingers * 3 coordinates * 4 bytes = 60 bytes
-            finger_positions = struct.unpack('<15f', depth_bytes[offset:offset+60])
-            print(f"[DEBUG] parse_hand_data: Left hand finger positions = {finger_positions[:6]}... (showing first 6)")
-            offset += 60
-            
-            # Parse left hand state: pinch_strength(4) + pinching(1) + grabbing(1) + confidence(1) + padding(1)
-            pinch_strength = struct.unpack('<f', depth_bytes[offset:offset+4])[0]
-            offset += 4
-            pinching = struct.unpack('<B', depth_bytes[offset:offset+1])[0] == 1
-            offset += 1
-            grabbing = struct.unpack('<B', depth_bytes[offset:offset+1])[0] == 1
-            offset += 1
-            confidence = struct.unpack('<B', depth_bytes[offset:offset+1])[0]
-            offset += 1
-            offset += 1  # skip padding
-            
-            print(f"[DEBUG] parse_hand_data: Left hand state - pinch_strength={pinch_strength}, pinching={pinching}, grabbing={grabbing}, confidence={confidence}")
-            
-            # Organize finger positions as nested structure
-            fingers = {
-                'thumb': (finger_positions[0], finger_positions[1], finger_positions[2]),
-                'index': (finger_positions[3], finger_positions[4], finger_positions[5]),
-                'middle': (finger_positions[6], finger_positions[7], finger_positions[8]),
-                'ring': (finger_positions[9], finger_positions[10], finger_positions[11]),
-                'pinky': (finger_positions[12], finger_positions[13], finger_positions[14])
-            }
-            
-            left_data = {
-                'tracked': True,
-                'fingers': fingers,
-                'pinch_strength': pinch_strength,
-                'pinching': pinching,
-                'grabbing': grabbing,
-                'confidence': confidence
-            }
-        else:
-            left_data = {'tracked': False}
-        
-        # Right hand tracked (0/1)
-        print(f"[DEBUG] parse_hand_data: Checking right hand at offset {offset}")
-        if len(depth_bytes) < offset + 1:
-            print(f"[DEBUG] parse_hand_data: Insufficient bytes for right hand tracking flag")
-            return None
-        right_tracked = struct.unpack('<B', depth_bytes[offset:offset+1])[0] == 1
-        print(f"[DEBUG] parse_hand_data: Right hand tracked = {right_tracked}")
-        offset += 1
-        
-        # Right hand data (if tracked)
-        right_data = None
+            (left_count,) = struct.unpack_from('<I', buf, off)  # uint32
+            off += 4
+            for _ in range(left_count):
+                x, y, z = struct.unpack_from('<fff', buf, off)   # 3 × float32
+                off += 12
+                left_points.append((x, y, z))
+            left_confidence = buf[off]          # 1-byte enum
+            off += 4                            # skip confidence + 3-byte padding
+
+        # ---- Right hand --------------------------------------------------------
+        right_tracked = bool(buf[off])
+        off += 1
+        right_points, right_confidence = [], 0
+
         if right_tracked:
-            print(f"[DEBUG] parse_hand_data: Parsing right hand data at offset {offset}")
-            if len(depth_bytes) < offset + 68:  # 60 bytes positions + 8 bytes state
-                print(f"[DEBUG] parse_hand_data: Insufficient bytes for right hand data ({len(depth_bytes)} < {offset + 68})")
-                return None
-                
-            # 5 finger positions: 5 fingers * 3 coordinates * 4 bytes = 60 bytes
-            finger_positions = struct.unpack('<15f', depth_bytes[offset:offset+60])
-            print(f"[DEBUG] parse_hand_data: Right hand finger positions = {finger_positions[:6]}... (showing first 6)")
-            offset += 60
-            
-            # Parse right hand state: pinch_strength(4) + pinching(1) + grabbing(1) + confidence(1) + padding(1)
-            pinch_strength = struct.unpack('<f', depth_bytes[offset:offset+4])[0]
-            offset += 4
-            pinching = struct.unpack('<B', depth_bytes[offset:offset+1])[0] == 1
-            offset += 1
-            grabbing = struct.unpack('<B', depth_bytes[offset:offset+1])[0] == 1
-            offset += 1
-            confidence = struct.unpack('<B', depth_bytes[offset:offset+1])[0]
-            offset += 1
-            offset += 1  # skip padding
-            
-            print(f"[DEBUG] parse_hand_data: Right hand state - pinch_strength={pinch_strength}, pinching={pinching}, grabbing={grabbing}, confidence={confidence}")
-            
-            # Organize finger positions as nested structure
-            fingers = {
-                'thumb': (finger_positions[0], finger_positions[1], finger_positions[2]),
-                'index': (finger_positions[3], finger_positions[4], finger_positions[5]),
-                'middle': (finger_positions[6], finger_positions[7], finger_positions[8]),
-                'ring': (finger_positions[9], finger_positions[10], finger_positions[11]),
-                'pinky': (finger_positions[12], finger_positions[13], finger_positions[14])
-            }
-            
-            right_data = {
-                'tracked': True,
-                'fingers': fingers,
-                'pinch_strength': pinch_strength,
-                'pinching': pinching,
-                'grabbing': grabbing,
-                'confidence': confidence
-            }
-        else:
-            right_data = {'tracked': False}
-        
-        # Timestamp (4 bytes - float)
-        print(f"[DEBUG] parse_hand_data: Parsing timestamp at offset {offset}")
-        if len(depth_bytes) < offset + 4:
-            print(f"[DEBUG] parse_hand_data: Insufficient bytes for timestamp")
-            return None
-        timestamp = struct.unpack('<f', depth_bytes[offset:offset+4])[0]
-        print(f"[DEBUG] parse_hand_data: Timestamp = {timestamp}")
-        
-        result = {
-            'left_hand': left_data,
-            'right_hand': right_data,
-            'timestamp': timestamp
-        }
-        
-        print(f"[DEBUG] parse_hand_data: Successfully parsed hand data - Left tracked: {left_data['tracked']}, Right tracked: {right_data['tracked']}")
-        return result
-    
-    def _print_hand_poses(self, hand_data: dict):
-        """Print hand pose information."""
-        print(f"=== Hand Poses (Timestamp: {hand_data['timestamp']:.3f}) ===")
-        
-        # Left hand
-        left = hand_data['left_hand']
-        print(f"Left Hand: {'Tracked' if left['tracked'] else 'Not Tracked'}")
-        if left['tracked']:
-            print(f"  Positions: {left['fingers'][:5]}... (showing first 5)")
-            print(f"  State: {left['pinch_strength']:.2f}, {left['pinching']}, {left['grabbing']}, {left['confidence']}")
-            
-        # Right hand  
-        right = hand_data['right_hand']
-        print(f"Right Hand: {'Tracked' if right['tracked'] else 'Not Tracked'}")
-        if right['tracked']:
-            print(f"  Positions: {right['fingers'][:5]}... (showing first 5)")
-            print(f"  State: {right['pinch_strength']:.2f}, {right['pinching']}, {right['grabbing']}, {right['confidence']}")
-        print()
+            (right_count,) = struct.unpack_from('<I', buf, off)
+            off += 4
+            for _ in range(right_count):
+                x, y, z = struct.unpack_from('<fff', buf, off)
+                off += 12
+                right_points.append((x, y, z))
+            right_confidence = buf[off]
+            off += 4                            # confidence + padding
+
+        # ---- Timestamp ---------------------------------------------------------
+        (timestamp,) = struct.unpack_from('<f', buf, off)       # float32
+
+        return HandData(
+            left_tracked, left_points, left_confidence,
+            right_tracked, right_points, right_confidence,
+            timestamp
+        )
